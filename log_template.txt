@@ -1,0 +1,30 @@
+project -> project_name folder_data.name
+	%H:%M:%S - log0
+	%H:%M:%S - log1 -> [ERROR]
+	%H:%M:%S - log2
+	.
+	.
+	.
+	%H:%M:%S - logN
+Number of errors: errors
+1
+project -> project_name2 folder_data.name2
+	%H:%M:%S - log0
+	%H:%M:%S - log1 -> [ERROR]
+	%H:%M:%S - log2
+	.
+	.
+	.
+	%H:%M:%S - logN
+Number of errors: errors
+2
+project -> project_name3 folder_data.name3
+	%H:%M:%S - log0
+	%H:%M:%S - log1 -> [ERROR]
+	%H:%M:%S - log2
+	.
+	.
+	.
+	%H:%M:%S - logN
+Number of errors: errors
+3

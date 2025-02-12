@@ -1,0 +1,6 @@
+__pycache__/
+const.py
+*.json
+project-info.xlsx
+test.py
+TODO.md
