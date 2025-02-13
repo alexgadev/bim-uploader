@@ -329,6 +329,9 @@ def check_last_modified_time(logger: Logger, access_token, project_id, folder_id
   except APIException as exception:
     return False # File not found
   
+  if file_id == None:
+    return False
+
   headers = {
      "Authorization": "Bearer " + access_token
   }
