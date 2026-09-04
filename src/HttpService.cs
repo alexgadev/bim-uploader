@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Threading.Tasks;
 
 namespace bim_push
@@ -82,14 +83,34 @@ namespace bim_push
             return await response.Content.ReadAsStringAsync();
         }
 
-        public async Task<string> PostAsync(string url, Header headers, string? body = null, string? param = null)
+        public async Task<string> PostAsync(string url, Header headers, string? json = null, Dictionary<string, string>? data = null)
         {
-            return null;
+            var request = new HttpRequestMessage(HttpMethod.Post, url);
+
+            // Body setting (deliberate choice of replacing first json assignment as only one content can be set at the same time
+            //                  and most of the times data will be the argument present if any).
+            // Must be done before headers so it doesn't truncate the addition of accept or content-type fields
+            if (json != null) request.Content = JsonContent.Create(json);
+            if (data != null) request.Content = new FormUrlEncodedContent(data);
+
+            // Header setting
+            request.Headers.Authorization = headers.GetAuthentication();
+            if (headers.IsAcceptFieldSet()) request.Headers.Accept.Add(headers.GetAcceptField());
+            if (headers.IsContentTypeFieldSet()) request.Content.Headers.ContentType = headers.GetContentType();
+
+            var response = await _client.SendAsync(request);
+            return await response.Content.ReadAsStringAsync();
         }
 
-        public async void put(string url, string headers, string? body = null, string? param = null)
+        public async Task<string> put(string url, byte[] data)
         {
+            var request = new HttpRequestMessage(HttpMethod.Put, url);
 
+            request.Content = new ByteArrayContent(data);
+            // request.Content = new StreamContent(fileStream); // for chunk uploads
+
+            var response = await _client.SendAsync(request);
+            return await response.Content.ReadAsStringAsync();
         }
     }
 }
