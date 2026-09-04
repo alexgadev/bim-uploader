@@ -13,6 +13,7 @@ namespace bim_push
     {
         private HttpService _httpService;
         private Logger _logHandle;
+        private AuthenticationToken? token = null;
 
         private class AuthenticationToken
         {
@@ -37,24 +38,23 @@ namespace bim_push
                                                                 ["scope"] = "data:read data:write"
                                                             });
                 dynamic data = JObject.Parse(response.Result);
-                
+
                 this.Value = data.access_token;
 
                 string secondsUntilExpiration = data.expires_in;
-                this._expiresAt = DateTime.UtcNow.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
+                this._expiresAt = DateTime.Now.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
             }
 
             public bool isExpired()
             {
-                return DateTime.Now >= _expiresAt;
+                return DateTime.Now >= this._expiresAt;
             }
         }
 
-        private AuthenticationToken? token = null;
 
         public ApsContext(string projectName, string internalCloudPath) 
         {
-            // initialize the logger
+            _httpService = new();
             _logHandle = new();
 
             // read json and populate project and hubs data structures
@@ -82,7 +82,7 @@ namespace bim_push
 
         public void Run(string serverPath)
         {
-            AuthenticationToken token = new AuthenticationToken(this);
+            AuthenticationToken token = new(this);
             Console.WriteLine(token.Value);
         }
 
