@@ -1,6 +1,5 @@
-__pycache__/
-const.py
+bin/
+obj/
+src/Secrets.cs
 *.json
 project-info.xlsx
-test.py
-TODO.md
