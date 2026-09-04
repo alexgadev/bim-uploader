@@ -1,5 +1,7 @@
-﻿using System;
+﻿using Newtonsoft.Json.Linq;
+using System;
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices.JavaScript;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -9,13 +11,14 @@ namespace bim_push
 {
     public class ApsContext
     {
-        private HttpService _httpService = new HttpService();
+        private HttpService _httpService;
+        private Logger _logHandle;
 
         private class AuthenticationToken
         {
             public string Value;
             
-            private DateTime expirationTime;
+            private DateTime _expiresAt;
 
             public AuthenticationToken(ApsContext _owner)
             {
@@ -33,19 +36,27 @@ namespace bim_push
                                                                 ["grant_type"] = "client_credentials",
                                                                 ["scope"] = "data:read data:write"
                                                             });
-                Console.Error.WriteLine(response.ToString());
-                this.Value = response.Result;
+                dynamic data = JObject.Parse(response.Result);
+                
+                this.Value = data.access_token;
+
+                string secondsUntilExpiration = data.expires_in;
+                this._expiresAt = DateTime.UtcNow.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
             }
 
             public bool isExpired()
             {
-                return DateTime.Now >= expirationTime;
+                return DateTime.Now >= _expiresAt;
             }
         }
+
+        private AuthenticationToken? token = null;
 
         public ApsContext(string projectName, string internalCloudPath) 
         {
             // initialize the logger
+            _logHandle = new();
+
             // read json and populate project and hubs data structures
             // check for arguments correctness
                 // check if project exists within the json

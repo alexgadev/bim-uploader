@@ -85,7 +85,6 @@ namespace bim_push
 
         public async Task<string> PostAsync(string url, Header headers, string? json = null, Dictionary<string, string>? data = null)
         {
-            Console.WriteLine(url);
             var request = new HttpRequestMessage(HttpMethod.Post, url);
 
             // Body setting (deliberate choice of replacing first json assignment as only one content can be set at the same time
@@ -103,10 +102,15 @@ namespace bim_push
             return await response.Content.ReadAsStringAsync();
         }
 
-        public async void put(string url, string headers, string? body = null, string? param = null)
+        public async Task<string> put(string url, byte[] data)
         {
-            // request.Content = new ByteArrayContent(bytes);
-            // request.Content = new StreamContent(fileStream);
+            var request = new HttpRequestMessage(HttpMethod.Put, url);
+
+            request.Content = new ByteArrayContent(data);
+            // request.Content = new StreamContent(fileStream); // for chunk uploads
+
+            var response = await _client.SendAsync(request);
+            return await response.Content.ReadAsStringAsync();
         }
     }
 }
