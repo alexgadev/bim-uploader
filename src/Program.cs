@@ -29,7 +29,7 @@ string projectName = args[0];
 string serverPath = args[1];
 string internalCloudPath = args[2];
 
-if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) == FileAttributes.Directory || File.Exists(serverPath))
+if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) == FileAttributes.Directory || !File.Exists(serverPath))
 {
     Console.Error.WriteLine($"Server path is invalid: {serverPath}");
     return 1;
