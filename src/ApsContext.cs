@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json.Linq;
+﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices.JavaScript;
@@ -11,15 +12,35 @@ namespace bim_push
 {
     public class ApsContext
     {
-        private HttpService _httpService;
-        private Logger _logHandle;
+        private HttpService httpService;
+        private Logger logHandle;
         private AuthenticationToken? token = null;
+        private ApsProject? project = null;
+
+        private class ApsProject
+        {
+            private string name;
+            private string folderId;
+            private int objectCount;
+
+            public ApsProject(string name, string? folderId = null, int? objectCount = null)
+            {
+                this.name = name;
+                this.folderId = folderId;
+                this.objectCount = objectCount == null ? -1 : (int)objectCount;
+            }
+
+            public void SetFolderId(string id) {  this.folderId = id; }
+            public string GetFolderId() {  return this.folderId; }
+            public void SetObjectCount(int count) { this.objectCount = count; }
+            public int GetObjectCount() { return this.objectCount; }
+        }
 
         private class AuthenticationToken
         {
             public string Value;
             
-            private DateTime _expiresAt;
+            private DateTime expiresAt;
 
             public AuthenticationToken(ApsContext _owner)
             {
@@ -30,7 +51,7 @@ namespace bim_push
 
                 var body = new { grant_type = "client_credentials", scope = "data:read data:write" };
 
-                var response = _owner._httpService.PostAsync(Secrets.BASE_DOMAIN + "authentication/v2/token",
+                var response = _owner.httpService.PostAsync(Secrets.BASE_DOMAIN + "authentication/v2/token",
                                                             header,
                                                             data: new Dictionary<string, string>
                                                             {
@@ -42,28 +63,30 @@ namespace bim_push
                 this.Value = data.access_token;
 
                 string secondsUntilExpiration = data.expires_in;
-                this._expiresAt = DateTime.Now.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
+                this.expiresAt = DateTime.Now.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
             }
 
-            public bool isExpired()
+            public bool IsExpired()
             {
-                return DateTime.Now >= this._expiresAt;
+                return DateTime.Now >= this.expiresAt;
             }
         }
 
-
         public ApsContext(string projectName, string internalCloudPath) 
         {
-            _httpService = new();
-            _logHandle = new();
+            this.httpService = new();
+            this.logHandle = new();
 
-            // read json and populate project and hubs data structures
-            // check for arguments correctness
-                // check if project exists within the json
-                    // obtain 2-legged token
-                    // if project doesn't exist within the json config file, check for the project looping through hubs (one request only)
-                // check for goal folder id inside the config json
-                    // call FindFolderVars
+            // read json and populate project info if found
+            ReadCache(projectName, internalCloudPath);
+
+            if(this.project?.GetFolderId() == null)
+            {
+                // project or destination folder isn't cached yet, find it and store it
+                FindFolderVars(internalCloudPath);
+            }
+
+
         }
 
         ~ApsContext() 
@@ -71,11 +94,57 @@ namespace bim_push
             // release data structures
         }
 
-        // provide functionalities to check on token expiration
-        // check token expiration before every request
-        // 
+        private void ReadCache(string projectName, string internalCloudPath)
+        {
+            try
+            {
+                // obtain settings path
+                string config = Environment.ProcessPath?.Replace("bim-push.exe", "") + "project_info.json";
 
-        private void FindFolderVars()
+                try
+                {
+                    // get projects obj
+                    var sample = JsonConvert.DeserializeObject(File.ReadAllText(config)) as JObject;
+
+                    // search for project name == projectName
+                    JObject? selectedProject = sample["projects"].Values<JObject>().FirstOrDefault(proj => proj["name"].Value<string>() == projectName);
+
+                    if (selectedProject != null)
+                    {
+                        Console.WriteLine($"Found project: {selectedProject}");
+
+                        // if found query folder_data looking for name = internalCloudPath[len - 1]
+
+                        JObject selectedFolder = selectedProject["folder_data"].Values<JObject>().FirstOrDefault(folder => folder["name"].Value<string>() == internalCloudPath.Split("/")[^1]);
+
+                        if (selectedFolder != null)
+                        {
+                            Console.WriteLine($"Found folder: {selectedFolder}");
+
+                            // if found initialize _project with id and objectCount
+                            this.project = new(projectName, selectedFolder["id"]?.ToString(), int.Parse(selectedFolder["objectCount"]?.ToString()));
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Project not found.");
+
+                        this.project = new(projectName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                }
+
+            }
+            catch (Exception ex)
+            {
+                this.logHandle.Log($"An unexpected error occurred: {ex.ToString}", true);
+            }
+        }
+
+        private void FindFolderVars(string cloudPath)
         {
 
         }
@@ -83,7 +152,7 @@ namespace bim_push
         public void Run(string serverPath)
         {
             AuthenticationToken token = new(this);
-            Console.WriteLine(token.Value);
+            //Console.WriteLine(token.Value);
         }
 
 
