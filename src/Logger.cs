@@ -17,7 +17,7 @@ namespace bim_push
             log_directory = Path.Combine(Environment.ProcessPath.Replace("bim-push.exe", ""), "logs");
 
             // file name is just the day of creation
-            string path = Path.Combine(log_directory, DateTime.Now.Date.ToString("%Y-%m-%d") + ".log");
+            string path = Path.Combine(log_directory, DateTime.Now.ToString("yyyy-MM-dd") + ".log");
             
             file_controller = new StreamWriter(path);
             
