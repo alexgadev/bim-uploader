@@ -25,9 +25,11 @@ namespace bim_push
             private string folderId;
             private int objectCount;
 
-            public ApsProject(string name, string? folderId = null, int? objectCount = null)
-            { //TODO: add hub and project to constructor
+            public ApsProject(string name, string? hubId = null, string? projectId = null, string? folderId = null, int? objectCount = null)
+            {
                 this.name = name;
+                this.hubId = hubId;
+                this.projectId = projectId;
                 this.folderId = folderId;
                 this.objectCount = objectCount == null ? -1 : (int)objectCount;
             }
@@ -40,6 +42,12 @@ namespace bim_push
             public string GetFolderId() {  return this.folderId; }
             public void SetObjectCount(int count) { this.objectCount = count; }
             public int GetObjectCount() { return this.objectCount; }
+
+
+            public override string ToString()
+            {
+                return $"{this.GetName()}: {this.GetHubId()}, {this.GetProjectId()}, {this.GetFolderId()}, {this.GetObjectCount().ToString()}";
+            }
         }
 
         private class AuthenticationToken
@@ -93,7 +101,7 @@ namespace bim_push
                 FindFolderVars(internalCloudPath);
             }
 
-
+            Console.WriteLine(this.project);
         }
 
         ~ApsContext() 
@@ -109,12 +117,20 @@ namespace bim_push
                 string config = Environment.ProcessPath?.Replace("bim-push.exe", "") + "project_info.json";
 
                 // get projects obj
-                var sample = JsonConvert.DeserializeObject(File.ReadAllText(config)) as JObject;
+                JObject root = File.Exists(config) && new FileInfo(config).Length > 0
+                ? JObject.Parse(File.ReadAllText(config))
+                : new JObject();
 
-                // search for project name == projectName
-                JObject? selectedProject = sample?["projects"]?.Values<JObject>().FirstOrDefault(proj => proj?["name"]?.Value<string>() == projectName);
 
-                if (selectedProject != null)
+                var match = root["hubs"]?
+                    .SelectMany(hub => (hub["projects"] ?? Enumerable.Empty<JToken>())
+                        .OfType<JObject>()
+                        .Select(proj => new { Hub = hub, Project = proj}))
+                    .FirstOrDefault(x => (string?)x.Project["name"] == projectName);
+
+                JObject? selectedProject = match.Project;
+
+                if (selectedProject is not null)
                 {
                     Console.WriteLine($"Found project: {selectedProject}");
 
@@ -126,14 +142,21 @@ namespace bim_push
                         Console.WriteLine($"Found folder: {selectedFolder}");
 
                         // if found initialize _project with id and objectCount
-                        this.project = new(projectName, selectedFolder["id"]?.ToString(), int.Parse(selectedFolder["objectCount"]?.ToString()));
+                        this.project = new ApsProject(projectName,
+                                                    (string?)match.Hub["id"],
+                                                    (string?)match.Project["id"],
+                                                    selectedFolder["id"]?.ToString(),
+                                                    int.Parse(selectedFolder["objectCount"]?.ToString()));
                     }
                     else
                     {
                         Console.WriteLine($"Folder not found: {selectedFolder}");
 
                         // store it's project id
-                        this.project = new(projectName, selectedProject["id"]?.ToString());
+                        this.project = new ApsProject(projectName,
+                                                    (string?)match.Hub["id"],
+                                                    (string?)match.Project["id"],
+                                                    selectedProject["id"]?.ToString());
                     }
                 }
                 else
@@ -154,7 +177,8 @@ namespace bim_push
 
         private void FindFolderVars(string cloudPath)
         {
-            if (this.project?.GetProjectId() != null)
+            JObject newEntry = new JObject();
+            if (this.project?.GetProjectId() is not null)
             {
                 // the project already exists within the cache but the folder isn't
 
@@ -164,7 +188,7 @@ namespace bim_push
                 // nor the project or the folder was found
 
             }
-            
+            WriteCache(newEntry);
         }
 
         private void WriteCache(JObject folderInfo)
