@@ -20,10 +20,10 @@ namespace bim_push
         public class Header
         {
             private AuthenticationHeaderValue auth;
-            private MediaTypeWithQualityHeaderValue accept;
-            private MediaTypeHeaderValue contentType;
+            private MediaTypeWithQualityHeaderValue? accept;
+            private MediaTypeHeaderValue? contentType;
 
-            public Header(AuthenticationHeaderValue auth, MediaTypeWithQualityHeaderValue accept, MediaTypeHeaderValue contentType)
+            public Header(AuthenticationHeaderValue auth, MediaTypeWithQualityHeaderValue? accept = null, MediaTypeHeaderValue? contentType = null)
             {
                 this.auth = auth;
                 this.accept = accept;
