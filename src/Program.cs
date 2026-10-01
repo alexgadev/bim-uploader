@@ -37,8 +37,8 @@ if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) != File
 
 try
 {
-    ApsContext apsContext = new ApsContext(projectName, internalCloudPath);
-    apsContext.Run(serverPath);
+    ApsContext apsContext = new ApsContext(projectName);
+    await apsContext.RunAsync(serverPath, internalCloudPath);
 
     Console.WriteLine("All done.");
     return 0;

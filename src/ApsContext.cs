@@ -1,8 +1,8 @@
-﻿using Autodesk.DataManagement;
-using Autodesk.DataManagement.Model;
-
-using Autodesk.Authentication;
+﻿using Autodesk.Authentication;
 using Autodesk.Authentication.Model;
+
+using Autodesk.DataManagement;
+using Autodesk.DataManagement.Model;
 
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -19,39 +19,37 @@ namespace bim_push
 {
     public class ApsContext
     {
-        private HttpService httpService;
-        private Logger logHandle;
-        private AuthenticationToken? token = null;
-        private ApsProject? project = null;
+        private readonly SDKManager _SDKManager;
+        private readonly Logger _logHandle;
+        private AuthenticationToken _token;
+        private readonly ApsProjectFolder _project;
 
-        private SDKManager _SDKManager = null;
-
-        private class ApsProject
+        private class ApsProjectFolder
         {
             private string name;
-            private string hubId;
-            private string projectId;
-            private string folderId;
-            private int objectCount;
+            private string? hubId;
+            private string? projectId;
+            private string? folderId;
+            private int? objectCount;
 
-            public ApsProject(string name, string? hubId = null, string? projectId = null, string? folderId = null, int? objectCount = null)
+            public ApsProjectFolder(string name, string? hubId = null, string? projectId = null, string? folderId = null, int? objectCount = null)
             {
                 this.name = name;
                 this.hubId = hubId;
                 this.projectId = projectId;
                 this.folderId = folderId;
-                this.objectCount = objectCount == null ? -1 : (int)objectCount;
+                this.objectCount = objectCount;
             }
 
             public string GetName() { return this.name; }
-            public string GetHubId() { return this.hubId; }
+            public string? GetHubId() { return this.hubId; }
             public void SetHubId(string id) { this.hubId = id; }
             public void SetProjectId(string id) { this.projectId = id; }
-            public string GetProjectId() { return this.projectId; }
+            public string? GetProjectId() { return this.projectId; }
             public void SetFolderId(string id) {  this.folderId = id; }
-            public string GetFolderId() {  return this.folderId; }
+            public string? GetFolderId() {  return this.folderId; }
             public void SetObjectCount(int count) { this.objectCount = count; }
-            public int GetObjectCount() { return this.objectCount; }
+            public int? GetObjectCount() { return this.objectCount; }
 
 
             public override string ToString()
@@ -63,46 +61,29 @@ namespace bim_push
         private class AuthenticationToken
         {
             public string Value;
-            
-            private DateTime expiresAt;
+            private readonly DateTime ExpiresAt;
 
             public AuthenticationToken(ApsContext owner)
             {
-                AuthenticationClient authenticationClient = new AuthenticationClient(owner._SDKManager);
-                dynamic token = authenticationClient.GetTwoLeggedTokenAsync(Secrets.APS_CLIENT_ID, Secrets.APS_CLIENT_SECRET, new List<Scopes>{ Scopes.DataRead, Scopes.DataWrite });
+                AuthenticationClient authenticationClient = new(owner._SDKManager);
+                dynamic token = authenticationClient.GetTwoLeggedTokenAsync(Secrets.APS_CLIENT_ID, Secrets.APS_CLIENT_SECRET, [Scopes.DataRead, Scopes.DataWrite], throwOnError: true);
 
                 this.Value = token.Result.AccessToken;
-
-                this.expiresAt = DateTime.Now.ToUniversalTime().AddSeconds(token.Result.ExpiresIn);
+                this.ExpiresAt = DateTime.Now.ToUniversalTime().AddSeconds(token.Result.ExpiresIn);
             }
 
             public bool IsExpired()
             {
-                return DateTime.Now.ToUniversalTime() >= this.expiresAt;
+                return DateTime.Now.ToUniversalTime() >= this.ExpiresAt;
             }
         }
 
-        public ApsContext(string projectName, string internalCloudPath) 
+        public ApsContext(string projectName) 
         {
-            this.httpService = new();
-            this.logHandle = new();
+            _logHandle = new();
             _SDKManager = SdkManagerBuilder.Create().Build();
-
-            // read json and populate project info if found
-            ReadCache(projectName, internalCloudPath);
-
-            // if this.project == null, this.project?.GetFolderId() evaluates to null and doesn't throw an exception
-            //if(this.project?.GetFolderId() is null) // this.project cannot be null here unless big exception occurred
-            //{
-            //    // project or destination folder isn't cached yet, find it and store it
-            //    FindFolderVars(internalCloudPath);
-            //}
-            //
-            //if (this.project?.GetFolderId() is null)
-            //{
-            //    this.logHandle.Log("Couldn't retrieve all variables necessary to complete upload...", true);
-            //    throw new Exception("Couldn't retrieve all variables necessary to complete upload...");
-            //}
+            _project = new(projectName);
+            _token = new(this);
         }
 
         ~ApsContext() 
@@ -120,7 +101,7 @@ namespace bim_push
                 // get projects obj
                 JObject root = File.Exists(config) && new FileInfo(config).Length > 0
                 ? JObject.Parse(File.ReadAllText(config))
-                : new JObject();
+                : [];
 
 
                 var match = root["hubs"]?
@@ -136,34 +117,31 @@ namespace bim_push
                     Console.WriteLine($"Found project: {selectedProject}");
 
                     // if found, query folder_data looking for name = internalCloudPath[len - 1]
-                    JObject selectedFolder = selectedProject["folder_data"].Values<JObject>().FirstOrDefault(folder => folder["name"].Value<string>() == internalCloudPath.Split("/")[^1]);
+                    JObject? selectedFolder = selectedProject["folder_data"]?.Values<JObject>().FirstOrDefault(folder => folder?["name"]?.Value<string>() == internalCloudPath.Split("/")[^1]);
 
-                    if (selectedFolder != null)
+                    if (selectedFolder is not null)
                     {
                         Console.WriteLine($"Found folder: {selectedFolder}");
 
                         // if found initialize _project with id and objectCount
-                        this.project = new ApsProject(projectName,
-                                                    (string?)match.Hub["id"],
-                                                    (string?)match.Project["id"],
-                                                    selectedFolder["id"]?.ToString(),
-                                                    int.Parse(selectedFolder["objectCount"]?.ToString()));
+                        _project.SetHubId((string)match.Hub["id"]);
+                        _project.SetProjectId((string)match.Project["id"]);
+                        _project.SetFolderId(selectedFolder["id"].ToString());
+                        _project.SetObjectCount(int.Parse(selectedFolder["objectCount"].ToString()));
                     }
                     else
                     {
                         Console.WriteLine($"Folder not found: {selectedFolder}");
 
                         // store it's project id
-                        this.project = new ApsProject(projectName,
-                                                    (string?)match.Hub["id"],
-                                                    (string?)match.Project["id"]);
+                        _project.SetHubId((string)match.Hub["id"]);
+                        _project.SetProjectId((string)match.Project["id"]);
                     }
                 }
                 else
                 {
-                    Console.WriteLine("Project not found.");
-                    
-                    this.project = new(projectName);
+                    // no hub where project with name == projectName exists
+                    _logHandle.Log($"No hub where project with name {projectName} exists. Check correctness of the project name specified as argument.", true);
                 }
             }
             catch (Exception ex)
@@ -171,109 +149,90 @@ namespace bim_push
                 Console.Error.WriteLine(ex.ToString());
                 
                 // no need to hard exit, execution can continue
-                this.logHandle.Log($"An unexpected error occurred: {ex.ToString}", true);
+                _logHandle.Log($"An unexpected error occurred: {ex.ToString}", true);
             }
         }
 
-        private void FindFolderVars(string cloudPath)
+        private async Task FindFolderVarsAsync(string cloudPath)
         {
-            this.token = new(this);
-            
-            AuthenticationHeaderValue authString = new("Bearer", this.token.Value);
+            DataManagementClient client = new(_SDKManager);
 
-            HttpService.Header header = new(authString);
-
-            Task<string> response;
-            dynamic json;
-            if (this.project?.GetProjectId() is null)
+            if (_project.GetProjectId() is null)
             {
                 // nor the project or the folder was found
-                response = this.httpService.GetAsync(Secrets.BASE_DOMAIN + "project/v1/hubs", header);
+                var hubs = await client.GetHubsAsync(accessToken: _token.Value, throwOnError: true);
+                var hubsData = hubs.Data;
 
-                json = JObject.Parse(response.Result);
-
-                var hubs = json.data; // JArray of hub ids, we can use those to request project info inside them and check if current project is in them
-
-                foreach (var hub in hubs) // theoretically, only two hubs  exist so no problem iterating over the array
+                foreach (var hub in hubsData) // theoretically, only two hubs exist so no problem iterating over the array
                 {
                     if(hub is not null)
                     {
-                        response = this.httpService.GetAsync($"{Secrets.BASE_DOMAIN}project/v1/hubs/{hub["id"].ToString()}/projects", header);
-
-                        json = JObject.Parse(response.Result);
-
-                        JArray? projects = json.data;
-
-                        var project = projects.OfType<JObject>().FirstOrDefault(p =>
-                                string.Equals((string?)p?["attributes"]?["name"], this.project.GetName(), StringComparison.Ordinal));
-
+                        var projects = await client.GetHubProjectsAsync(hubId: hub.Id, accessToken: _token.Value, throwOnError: true);
+                        var project = projects.Data.FirstOrDefault(p =>
+                                string.Equals(p.Attributes.Name, _project.GetName(), StringComparison.Ordinal));
+                        
                         if(project is not null)
                         {
-                            Console.WriteLine($"{hub["id"].ToString()}, {project["id"]?.ToString()}");
-                            this.project?.SetHubId(hub["id"].ToString());
-                            this.project?.SetProjectId(project["id"]?.ToString());
+                            _project.SetHubId(hub.Id);
+                            _project.SetProjectId(project.Id);
                             break;
                         }
                     }
                 }
-
-                if(this.project.GetProjectId() is null)
-                {
-                    this.logHandle.Log("Project wasn't found, check correctness of the name", true);
-                    return; // TODO: might want to take another look on this exit point
-                }
             }
 
-            string[] cloudArray = cloudPath.Split("/");
-
-            // the project is already store but the folder isn't
-            // find first folder ID "Project Files"
-            // GET /topFolders
-            response = this.httpService.GetAsync($"{Secrets.BASE_DOMAIN}project/v1/hubs/{this.project.GetHubId()}/projects/{this.project.GetProjectId()}/topFolders", header);
-            
-            json = JObject.Parse(response.Result);
-
-            JArray? data = json.data;
-            var topFolder = data.OfType<JObject>().FirstOrDefault(f =>
-                                string.Equals((string?)f?["attributes"]?["name"], cloudArray[0], StringComparison.Ordinal));
-
-            if(topFolder is not null)
+            if(_project.GetProjectId() is null)
             {
-                string folderId = topFolder["id"].ToString();
-                JObject? folder = null;
-                // recursive find nested folders until end goal is reached
-                // GET folder_id:/contents
-                for(int i = 1; i < cloudArray.Length; i++)
+                _logHandle.Log("Project wasn't found, check correctness of the name", true);
+            }
+            else
+            {
+                string[] cloudArray = cloudPath.Split("/");
+
+                // the project is already store but the folder isn't, find first folder ID "Project Files"
+                // GET /topFolders
+                var topfolders = await client.GetProjectTopFoldersAsync(hubId: _project.GetHubId(), projectId: _project.GetProjectId(), accessToken: _token.Value, throwOnError: true);
+                var topfolder = topfolders.Data.FirstOrDefault(f =>
+                                    string.Equals(f.Attributes.Name, cloudArray[0], StringComparison.Ordinal));
+
+                if (topfolder is not null)
                 {
-                    response = this.httpService.GetAsync($"{Secrets.BASE_DOMAIN}data/v1/projects/{this.project.GetProjectId()}/folders/{folderId}/contents", header);
+                    string folderId = topfolder.Id;
 
-                    json = JObject.Parse(response.Result);
-
-                    data = json.data;
-
-                    try
+                    // recursive find nested folders until end goal is reached
+                    // GET folder_id:/contents
+                    dynamic? folder = null;
+                    for(int i = 1; i < cloudArray.Length; i++)
                     {
-                        folder = data.OfType<JObject>().FirstOrDefault(d =>
-                                        string.Equals((string?)d?["attributes"]?["displayName"], cloudArray[i], StringComparison.Ordinal));
-                        folderId = folder?["id"]?.ToString();
+                        var folderContent = await client.GetFolderContentsAsync(projectId: _project.GetProjectId(), folderId: folderId, accessToken: _token.Value, throwOnError: true);
+                        try
+                        {
+                            folder = folderContent.Data.FirstOrDefault(d =>
+                                                        string.Equals(((dynamic)d).Attributes.Name, cloudArray[i], StringComparison.Ordinal));
+                            folderId = folder.Id;
+                        }
+                        catch (Exception ex)
+                        {
+                            folder = null;
+                            Console.WriteLine(ex.GetType().ToString());
+                            this._logHandle.Log($"Folder {cloudArray[i]} couldn't be found, check correctness of the name", true);
+                        }
                     }
-                    catch (Exception ex)
+
+                    if(folder is not null)
                     {
-                        Console.WriteLine(ex.GetType().ToString());
-                        this.logHandle.Log($"Folder {cloudArray[i]} couldn't be found, check correctness of the name", true);
-                        return; // TODO: might want to take another look on this exit point
+                        _project.SetFolderId(folderId);
+                        _project.SetObjectCount(int.Parse(folder.Attributes.ObjectCount.ToString()));
+                        Console.WriteLine(_project);
+                        WriteCache(new JObject
+                            {
+                                ["id"] = _project.GetFolderId(),
+                                ["name"] = cloudArray[^1],
+                                ["objectCount"] = _project.GetObjectCount()
+                            });
                     }
                 }
-                this.project.SetFolderId(folderId);
-                this.project.SetObjectCount(int.Parse(folder["attributes"]["objectCount"].ToString()));
             }
-
-            WriteCache(new JObject
-                {
-                    ["id"] = this.project.GetFolderId(),
-                    ["name"] = cloudArray[^1],
-                    ["objectCount"] = this.project.GetObjectCount()
-                });
         }
 
         private void WriteCache(JObject folderInfo)
@@ -284,7 +243,7 @@ namespace bim_push
             // check existance of project_info.json file
             JObject root = File.Exists(config) && new FileInfo(config).Length > 0
                 ? JObject.Parse(File.ReadAllText(config)) 
-                : new JObject();
+                : [];
 
             // repeated checks of existance to avoid exceptions
             if (root["hubs"] is not JArray hubs)
@@ -295,13 +254,13 @@ namespace bim_push
 
             // search the hub id
             var hub = hubs.OfType<JObject>().FirstOrDefault(h =>
-                string.Equals((string?)h["id"], this.project.GetHubId(), StringComparison.Ordinal));
+                string.Equals((string?)h["id"], _project.GetHubId(), StringComparison.Ordinal));
 
             if(hub is null)
             {
                 hub = new JObject
                 {
-                    ["id"] = this.project.GetHubId(),
+                    ["id"] = _project.GetHubId(),
                     ["projects"] = new JArray()
                 };
                 hubs.Add(hub);
@@ -316,14 +275,14 @@ namespace bim_push
 
             // search the project
             var project = projects.OfType<JObject>().FirstOrDefault(p =>
-                string.Equals((string?)p["id"], this.project.GetProjectId(), StringComparison.Ordinal));
+                string.Equals((string?)p["id"], _project.GetProjectId(), StringComparison.Ordinal));
 
             if(project is null)
             {
                 project = new JObject
                 {
-                    ["id"] = this.project.GetProjectId(),
-                    ["name"] = this.project.GetName(),
+                    ["id"] = _project.GetProjectId(),
+                    ["name"] = _project.GetName(),
                     ["folder_data"] = new JArray()
                 };
                 projects.Add(project);
@@ -353,35 +312,35 @@ namespace bim_push
 
         private string? GetFileId(string filename)
         {
-            int pages = (int)Math.Floor(this.project.GetObjectCount() / 200.00);
-
-            HttpService.Header header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
-            for (int i = 0; i <= pages; i++)
-            {
-                if (this.token.IsExpired())
-                {
-                    this.token = new(this);
-                    header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
-                }
-                
-                var response = httpService.GetAsync(
-                    $"{Secrets.BASE_DOMAIN}data/v1/projects/{this.project.GetProjectId()}/folders/{this.project.GetFolderId()}/contents",
-                    header,
-                    query: new Dictionary<string, string>
-                    {
-                        ["page[number]"] = i.ToString()
-                    });
-
-                dynamic json = JObject.Parse(response.Result);
-
-                JArray? contents = json.data;
-
-                var project = contents.OfType<JObject>().FirstOrDefault(c =>
-                        string.Equals((string?)c?["attributes"]?["displayName"], filename, StringComparison.Ordinal));
-
-                if (project is not null) return project["id"].ToString();
-                else Thread.Sleep(5000);
-            }
+            //int pages = (int)Math.Floor(this.project.GetObjectCount() / 200.00);
+            //
+            //HttpService.Header header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
+            //for (int i = 0; i <= pages; i++)
+            //{
+            //    if (this.token.IsExpired())
+            //    {
+            //        this.token = new(this);
+            //        header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
+            //    }
+            //    
+            //    var response = httpService.GetAsync(
+            //        $"{Secrets.BASE_DOMAIN}data/v1/projects/{this.project.GetProjectId()}/folders/{this.project.GetFolderId()}/contents",
+            //        header,
+            //        query: new Dictionary<string, string>
+            //        {
+            //            ["page[number]"] = i.ToString()
+            //        });
+            //
+            //    dynamic json = JObject.Parse(response.Result);
+            //
+            //    JArray? contents = json.data;
+            //
+            //    var project = contents.OfType<JObject>().FirstOrDefault(c =>
+            //            string.Equals((string?)c?["attributes"]?["displayName"], filename, StringComparison.Ordinal));
+            //
+            //    if (project is not null) return project["id"].ToString();
+            //    else Thread.Sleep(5000);
+            //}
             return null;
         }
 
@@ -391,7 +350,7 @@ namespace bim_push
             return true;
         }
 
-        public void Run(string serverPath)
+        public async Task RunAsync(string serverPath, string internalCloudPath)
         {
             IEnumerable<string> paths;
             // folder passed as starting point, upload all files under this directory and subdirectories
@@ -407,12 +366,27 @@ namespace bim_push
                 paths = [serverPath];
             }
 
-            foreach(string path in paths)
+            // read json and populate project info if found
+            //ReadCache(projectName, internalCloudPath);
+
+            if (_project.GetFolderId() is null)
+            {
+                // project or destination folder isn't cached yet, find it and store it
+                await FindFolderVarsAsync(internalCloudPath);
+            }
+
+            if (_project.GetFolderId() is null)
+            {
+                _logHandle.Log("Couldn't retrieve all variables necessary to complete upload...", true);
+                throw new Exception("Couldn't retrieve all variables necessary to complete upload...");
+            }
+
+            foreach (string path in paths)
             {
                 string? fileId = GetFileId(path);
                 if (!WasModified(fileId))
                 {
-                    this.logHandle.Log($"File {path} has not been modified, thus will not be updated in the cloud", true);
+                    _logHandle.Log($"File {path} has not been modified, thus will not be updated in the cloud", true);
                 }
                 else
                 {
