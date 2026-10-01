@@ -1,4 +1,10 @@
-﻿using Newtonsoft.Json;
+﻿using Autodesk.DataManagement;
+using Autodesk.DataManagement.Model;
+
+using Autodesk.Authentication;
+using Autodesk.Authentication.Model;
+
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Net.Http.Headers;
@@ -6,7 +12,7 @@ using System.Runtime.InteropServices.JavaScript;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using static bim_push.HttpService;
+using Autodesk.SDKManager;
 
 
 namespace bim_push
@@ -17,6 +23,8 @@ namespace bim_push
         private Logger logHandle;
         private AuthenticationToken? token = null;
         private ApsProject? project = null;
+
+        private SDKManager _SDKManager = null;
 
         private class ApsProject
         {
@@ -60,31 +68,17 @@ namespace bim_push
 
             public AuthenticationToken(ApsContext owner)
             {
-                string token = Convert.ToBase64String(Encoding.UTF8.GetBytes(Secrets.APS_CLIENT_ID + ":" + Secrets.APS_CLIENT_SECRET));
-                AuthenticationHeaderValue authString = new AuthenticationHeaderValue("Basic", token);
-                
-                HttpService.Header header = new HttpService.Header(authString, HttpService.acceptJson, HttpService.contentTypeUrlencoded);
+                AuthenticationClient authenticationClient = new AuthenticationClient(owner._SDKManager);
+                dynamic token = authenticationClient.GetTwoLeggedTokenAsync(Secrets.APS_CLIENT_ID, Secrets.APS_CLIENT_SECRET, new List<Scopes>{ Scopes.DataRead, Scopes.DataWrite });
 
-                var body = new { grant_type = "client_credentials", scope = "data:read data:write" };
+                this.Value = token.Result.AccessToken;
 
-                var response = owner.httpService.PostAsync(Secrets.BASE_DOMAIN + "authentication/v2/token",
-                                                            header,
-                                                            data: new Dictionary<string, string>
-                                                            {
-                                                                ["grant_type"] = "client_credentials",
-                                                                ["scope"] = "data:read data:write"
-                                                            });
-                dynamic data = JObject.Parse(response.Result);
-
-                this.Value = data.access_token;
-
-                string secondsUntilExpiration = data.expires_in;
-                this.expiresAt = DateTime.Now.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
+                this.expiresAt = DateTime.Now.ToUniversalTime().AddSeconds(token.Result.ExpiresIn);
             }
 
             public bool IsExpired()
             {
-                return DateTime.Now >= this.expiresAt;
+                return DateTime.Now.ToUniversalTime() >= this.expiresAt;
             }
         }
 
@@ -92,21 +86,23 @@ namespace bim_push
         {
             this.httpService = new();
             this.logHandle = new();
+            _SDKManager = SdkManagerBuilder.Create().Build();
 
             // read json and populate project info if found
             ReadCache(projectName, internalCloudPath);
 
             // if this.project == null, this.project?.GetFolderId() evaluates to null and doesn't throw an exception
-            if(this.project?.GetFolderId() is null) // this.project cannot be null here unless big exception occurred
-            {
-                // project or destination folder isn't cached yet, find it and store it
-                FindFolderVars(internalCloudPath);
-            }
-
-            if (this.project?.GetFolderId() is null)
-            {
-                this.logHandle.Log("Couldn't retrieve all variables necessary to complete upload...", true);
-            }
+            //if(this.project?.GetFolderId() is null) // this.project cannot be null here unless big exception occurred
+            //{
+            //    // project or destination folder isn't cached yet, find it and store it
+            //    FindFolderVars(internalCloudPath);
+            //}
+            //
+            //if (this.project?.GetFolderId() is null)
+            //{
+            //    this.logHandle.Log("Couldn't retrieve all variables necessary to complete upload...", true);
+            //    throw new Exception("Couldn't retrieve all variables necessary to complete upload...");
+            //}
         }
 
         ~ApsContext() 
@@ -355,11 +351,94 @@ namespace bim_push
             }
         }
 
-        public void Run(string serverPath)
+        private string? GetFileId(string filename)
         {
-            //Console.WriteLine(token.Value);
+            int pages = (int)Math.Floor(this.project.GetObjectCount() / 200.00);
+
+            HttpService.Header header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
+            for (int i = 0; i <= pages; i++)
+            {
+                if (this.token.IsExpired())
+                {
+                    this.token = new(this);
+                    header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
+                }
+                
+                var response = httpService.GetAsync(
+                    $"{Secrets.BASE_DOMAIN}data/v1/projects/{this.project.GetProjectId()}/folders/{this.project.GetFolderId()}/contents",
+                    header,
+                    query: new Dictionary<string, string>
+                    {
+                        ["page[number]"] = i.ToString()
+                    });
+
+                dynamic json = JObject.Parse(response.Result);
+
+                JArray? contents = json.data;
+
+                var project = contents.OfType<JObject>().FirstOrDefault(c =>
+                        string.Equals((string?)c?["attributes"]?["displayName"], filename, StringComparison.Ordinal));
+
+                if (project is not null) return project["id"].ToString();
+                else Thread.Sleep(5000);
+            }
+            return null;
         }
 
+        private bool WasModified(string? fileId)
+        {
+            if (fileId is null) return true; // file doesn't exist in the cloud yet
+            return true;
+        }
 
+        public void Run(string serverPath)
+        {
+            IEnumerable<string> paths;
+            // folder passed as starting point, upload all files under this directory and subdirectories
+            if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) == FileAttributes.Directory)
+            {
+                paths = Directory
+                    .EnumerateFiles(serverPath, "*", new EnumerationOptions { RecurseSubdirectories = true })
+                    .Where(f => !Path.GetExtension(f).Equals(".log", StringComparison.OrdinalIgnoreCase));
+
+            }
+            else // single file upload
+            {
+                paths = [serverPath];
+            }
+
+            foreach(string path in paths)
+            {
+                string? fileId = GetFileId(path);
+                if (!WasModified(fileId))
+                {
+                    this.logHandle.Log($"File {path} has not been modified, thus will not be updated in the cloud", true);
+                }
+                else
+                {
+                    // Step 2: Create a Storage Object
+                    //object_id, object_key, bucket_key = create_object(logger=logger, access_token=access_token, folder_id=folder_id, project_id=project_id, filename=filename) 
+                    //StoragePayload sp = new();
+                    //Task<Storage> st = this.client.CreateStorageAsync(this.project.GetProjectId(), sp);
+
+                    // Step 3: Generate a Signed S3 URL
+                    //upload_key, urls = generate_signed_url(logger = logger, access_token = access_token, bucket_key = bucket_key, object_key = object_key)
+
+                    // Step 4: Upload a File to the Signed URL
+                    //upload_file(logger, urls, filepath)
+
+                    // Step 5: Complete the Upload
+                    //complete_upload(logger, access_token, upload_key, bucket_key, object_key)
+
+                    // Step 6: Get the file id if it exists
+                    //file_id = get_file_id(logger, access_token, project_id, folder_id, objectCount, filename)
+                    //if file_id != None: # if file id is None then it means it couldn't be found so a new version must be created
+                    //   Step 7a: Create Additional Versions of the File
+                    //  add_additional_version(logger, access_token, filename, file_id, object_id, project_id)
+                    //else:
+                    //   Step 7b: Create the First Version of the File
+                }
+            }
+        }
     }
 }
