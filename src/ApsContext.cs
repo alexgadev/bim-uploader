@@ -4,15 +4,14 @@ using Autodesk.Authentication.Model;
 using Autodesk.DataManagement;
 using Autodesk.DataManagement.Model;
 
+using Autodesk.SDKManager;
+
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
-using System.Net.Http.Headers;
-using System.Runtime.InteropServices.JavaScript;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using Autodesk.SDKManager;
 
 
 namespace bim_push
@@ -310,37 +309,25 @@ namespace bim_push
             }
         }
 
-        private string? GetFileId(string filename)
+        private async Task<string?> GetFileId(string filename)
         {
-            //int pages = (int)Math.Floor(this.project.GetObjectCount() / 200.00);
-            //
-            //HttpService.Header header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
-            //for (int i = 0; i <= pages; i++)
-            //{
-            //    if (this.token.IsExpired())
-            //    {
-            //        this.token = new(this);
-            //        header = new(new AuthenticationHeaderValue("Bearer", this.token.Value));
-            //    }
-            //    
-            //    var response = httpService.GetAsync(
-            //        $"{Secrets.BASE_DOMAIN}data/v1/projects/{this.project.GetProjectId()}/folders/{this.project.GetFolderId()}/contents",
-            //        header,
-            //        query: new Dictionary<string, string>
-            //        {
-            //            ["page[number]"] = i.ToString()
-            //        });
-            //
-            //    dynamic json = JObject.Parse(response.Result);
-            //
-            //    JArray? contents = json.data;
-            //
-            //    var project = contents.OfType<JObject>().FirstOrDefault(c =>
-            //            string.Equals((string?)c?["attributes"]?["displayName"], filename, StringComparison.Ordinal));
-            //
-            //    if (project is not null) return project["id"].ToString();
-            //    else Thread.Sleep(5000);
-            //}
+            DataManagementClient client = new(_SDKManager);
+            
+            int pages = (int)Math.Floor((double)(_project.GetObjectCount()! / 200.00));
+            for (int i = 0; i <= pages; i++)
+            {
+                if (_token.IsExpired())
+                {
+                    _token = new(this);
+                }
+
+                var folderContent = await client.GetFolderContentsAsync(projectId: _project.GetProjectId(), folderId: _project.GetFolderId(), pageNumber: i, accessToken: _token.Value, throwOnError: true);
+
+                dynamic? file = folderContent.Data.FirstOrDefault(c =>
+                        string.Equals(((dynamic)c).Attributes.DisplayName, filename, StringComparison.Ordinal));
+
+                if (file is not null) return file.Id;
+            }
             return null;
         }
 
@@ -367,7 +354,7 @@ namespace bim_push
             }
 
             // read json and populate project info if found
-            //ReadCache(projectName, internalCloudPath);
+            ReadCache(_project.GetName(), internalCloudPath);
 
             if (_project.GetFolderId() is null)
             {
@@ -383,7 +370,7 @@ namespace bim_push
 
             foreach (string path in paths)
             {
-                string? fileId = GetFileId(path);
+                string? fileId = GetFileId(path).Result;
                 if (!WasModified(fileId))
                 {
                     _logHandle.Log($"File {path} has not been modified, thus will not be updated in the cloud", true);
