@@ -38,7 +38,7 @@ if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) != File
 try
 {
     ApsContext apsContext = new ApsContext(projectName);
-    await apsContext.RunAsync(serverPath, internalCloudPath);
+    await apsContext.UploadAsync(serverPath, internalCloudPath);
 
     Console.WriteLine("All done.");
     return 0;

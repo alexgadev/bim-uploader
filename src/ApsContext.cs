@@ -3,7 +3,8 @@ using Autodesk.Authentication.Model;
 
 using Autodesk.DataManagement;
 using Autodesk.DataManagement.Model;
-
+using Autodesk.Oss;
+using Autodesk.Oss.Model;
 using Autodesk.SDKManager;
 
 using Newtonsoft.Json;
@@ -79,15 +80,10 @@ namespace bim_push
 
         public ApsContext(string projectName) 
         {
-            _logHandle = new();
             _SDKManager = SdkManagerBuilder.Create().Build();
-            _project = new(projectName);
+            _logHandle = new();
             _token = new(this);
-        }
-
-        ~ApsContext() 
-        {
-            // release data structures
+            _project = new(projectName);
         }
 
         private void ReadCache(string projectName, string internalCloudPath)
@@ -159,6 +155,10 @@ namespace bim_push
             if (_project.GetProjectId() is null)
             {
                 // nor the project or the folder was found
+                if (_token.IsExpired())
+                {
+                    _token = new(this);
+                }
                 var hubs = await client.GetHubsAsync(accessToken: _token.Value, throwOnError: true);
                 var hubsData = hubs.Data;
 
@@ -166,6 +166,10 @@ namespace bim_push
                 {
                     if(hub is not null)
                     {
+                        if (_token.IsExpired())
+                        {
+                            _token = new(this);
+                        }
                         var projects = await client.GetHubProjectsAsync(hubId: hub.Id, accessToken: _token.Value, throwOnError: true);
                         var project = projects.Data.FirstOrDefault(p =>
                                 string.Equals(p.Attributes.Name, _project.GetName(), StringComparison.Ordinal));
@@ -190,6 +194,10 @@ namespace bim_push
 
                 // the project is already store but the folder isn't, find first folder ID "Project Files"
                 // GET /topFolders
+                if (_token.IsExpired())
+                {
+                    _token = new(this);
+                }
                 var topfolders = await client.GetProjectTopFoldersAsync(hubId: _project.GetHubId(), projectId: _project.GetProjectId(), accessToken: _token.Value, throwOnError: true);
                 var topfolder = topfolders.Data.FirstOrDefault(f =>
                                     string.Equals(f.Attributes.Name, cloudArray[0], StringComparison.Ordinal));
@@ -203,6 +211,10 @@ namespace bim_push
                     dynamic? folder = null;
                     for(int i = 1; i < cloudArray.Length; i++)
                     {
+                        if (_token.IsExpired())
+                        {
+                            _token = new(this);
+                        }
                         var folderContent = await client.GetFolderContentsAsync(projectId: _project.GetProjectId(), folderId: folderId, accessToken: _token.Value, throwOnError: true);
                         try
                         {
@@ -320,7 +332,6 @@ namespace bim_push
                 {
                     _token = new(this);
                 }
-
                 var folderContent = await client.GetFolderContentsAsync(projectId: _project.GetProjectId(), folderId: _project.GetFolderId(), pageNumber: i, accessToken: _token.Value, throwOnError: true);
 
                 dynamic? file = folderContent.Data.FirstOrDefault(c =>
@@ -331,13 +342,145 @@ namespace bim_push
             return null;
         }
 
-        private bool WasModified(string? fileId)
+        private async Task<bool> WasModified(string? fileId, string filepath)
         {
             if (fileId is null) return true; // file doesn't exist in the cloud yet
-            return true;
+            
+            DataManagementClient client = new(_SDKManager);
+            Item item = await client.GetItemAsync(_project.GetProjectId(), fileId, _token.Value, throwOnError: true);
+
+            // "lastModifiedTime": "2025-01-29T10:08:06.0000000Z"
+            return File.GetLastWriteTimeUtc(filepath) <= item.Data.Attributes.LastModifiedTime.ToUniversalTime();
         }
 
-        public async Task RunAsync(string serverPath, string internalCloudPath)
+        private async Task<List<string>> CreateStorageObject(string filename)
+        {
+            DataManagementClient client = new(_SDKManager);
+
+            StoragePayload storagePayload = new() { 
+                Jsonapi = new JsonApiVersion() { 
+                    VarVersion = JsonApiVersionValue._10 
+                }, 
+                Data = new() { 
+                    Type = TypeObject.Objects, 
+                    Attributes = new() { 
+                        Name = filename 
+                    }, 
+                    Relationships = new() { 
+                        Target = new() { 
+                            Data = new() { 
+                                Type = TypeFolderItemsForStorage.Folders, 
+                                Id = _project.GetFolderId() 
+                            }
+                        }
+                    }
+                }
+            };
+
+            Storage st = await client.CreateStorageAsync(_project.GetProjectId(), storagePayload, _token.Value, throwOnError: true);
+            
+            return [st.Data.Id, st.Data.Id.Split("/")[^1], st.Data.Id.Split("/")[^2].Split(":")[^1]];
+        }
+
+        private async Task CreateFirstVersion(string filename, string objectId)
+        {
+            DataManagementClient client = new(_SDKManager);
+            
+            ItemPayload payload = new() { 
+                Jsonapi = new JsonApiVersion() { VarVersion = JsonApiVersionValue._10 }, 
+                Data = new() { 
+                    Type = TypeItem.Items, 
+                    Attributes = new() { 
+                        DisplayName = filename, 
+                        Extension = new() { 
+                            Type = "items:autodesk.bim360:File", 
+                            VarVersion = "1.0" 
+                        }
+                    }, 
+                    Relationships = new() { 
+                        Tip = new() { 
+                            Data = new() { 
+                                Type = TypeVersion.Versions, 
+                                Id = "1" 
+                            } 
+                        }, 
+                        Parent = new() { 
+                            Data = new() { 
+                                Type = TypeFolder.Folders, 
+                                Id = _project.GetFolderId() 
+                            } 
+                        }
+                    }
+                }, 
+                Included = [ new() {
+                    Type = TypeVersion.Versions,
+                    Id = "1",
+                    Attributes = new() {
+                        Name = filename,
+                        Extension = new() {
+                            Type = "versions:autodesk.bim360:File",
+                            VarVersion = "1.0"
+                        }
+                    },
+                    Relationships = new() {
+                        Storage = new() {
+                            Data = new() {
+                                Type = TypeObject.Objects,
+                                Id = objectId
+                            }
+                        }
+                    } 
+                }]
+            };
+
+            await client.CreateItemAsync(_project.GetProjectId(), payload, _token.Value, throwOnError: true);
+        }
+
+        private async Task CreateAdditionalVersion(string filename, string fileId, string objectId)
+        {
+            DataManagementClient client = new(_SDKManager);
+
+            VersionPayload payload = new()
+            {
+                Jsonapi = new JsonApiVersion() { VarVersion = JsonApiVersionValue._10 },
+                Data = new()
+                {
+                    Type = TypeVersion.Versions,
+                    Attributes = new()
+                    {
+                        Name = filename,
+                        Extension = new()
+                        {
+                            Type = "versions:autodesk.bim360:File",
+                            VarVersion = "1.0"
+                        }
+                    },
+                    Relationships = new()
+                    {
+                        Item = new()
+                        {
+                            Data = new()
+                            {
+                                Type = TypeItem.Items,
+                                Id = fileId
+                            }
+                        },
+                        Storage = new()
+                        {
+                            Data = new()
+                            {
+                                Type = TypeObject.Objects,
+                                Id = objectId
+                            }
+                        }
+                    }
+                }
+            };
+
+            await client.CreateVersionAsync(_project.GetProjectId(), payload, _token.Value, throwOnError: true);
+        }
+
+        public async Task UploadAsync(string serverPath, string internalCloudPath)
         {
             IEnumerable<string> paths;
             // folder passed as starting point, upload all files under this directory and subdirectories
@@ -371,33 +514,33 @@ namespace bim_push
             foreach (string path in paths)
             {
                 string? fileId = GetFileId(path).Result;
-                if (!WasModified(fileId))
+                if (!WasModified(fileId, path).Result)
                 {
                     _logHandle.Log($"File {path} has not been modified, thus will not be updated in the cloud", true);
                 }
                 else
                 {
-                    // Step 2: Create a Storage Object
-                    //object_id, object_key, bucket_key = create_object(logger=logger, access_token=access_token, folder_id=folder_id, project_id=project_id, filename=filename) 
-                    //StoragePayload sp = new();
-                    //Task<Storage> st = this.client.CreateStorageAsync(this.project.GetProjectId(), sp);
+                    DataManagementClient client = new(_SDKManager);
 
-                    // Step 3: Generate a Signed S3 URL
-                    //upload_key, urls = generate_signed_url(logger = logger, access_token = access_token, bucket_key = bucket_key, object_key = object_key)
+                    // Step 1: Create a Storage Object
+                    List<string> storageInfo = await CreateStorageObject(path.Split("/")[^1]);
+                    string objectId = storageInfo[0];
+                    string objectKey = storageInfo[1];
+                    string bucketKey = storageInfo[2];
 
-                    // Step 4: Upload a File to the Signed URL
-                    //upload_file(logger, urls, filepath)
+                    // Step 2: Upload a File to a Signed URL
+                    OssClient ossClient = new(_SDKManager);
+                    await ossClient.UploadObjectAsync(bucketKey: bucketKey, objectKey: objectKey, sourceToUpload: File.OpenRead(path), accessToken: _token.Value);
 
-                    // Step 5: Complete the Upload
-                    //complete_upload(logger, access_token, upload_key, bucket_key, object_key)
-
-                    // Step 6: Get the file id if it exists
-                    //file_id = get_file_id(logger, access_token, project_id, folder_id, objectCount, filename)
-                    //if file_id != None: # if file id is None then it means it couldn't be found so a new version must be created
-                    //   Step 7a: Create Additional Versions of the File
-                    //  add_additional_version(logger, access_token, filename, file_id, object_id, project_id)
-                    //else:
-                    //   Step 7b: Create the First Version of the File
+                    // Step 3: Create a Version of the File in the Cloud
+                    if (fileId is null)
+                    {
+                        await CreateFirstVersion(path.Split("/")[^1], objectId);
+                    }
+                    else
+                    {
+                        await CreateAdditionalVersion(path.Split("/")[^1], fileId, objectId);
+                    }
                 }
             }
         }
