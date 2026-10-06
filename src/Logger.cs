@@ -26,7 +26,7 @@ namespace bim_push
             errors = 0;
         }
 
-        ~Logger()
+        public void Dispose()
         {
             file_controller.WriteLine("Number of errors: " + this.errors.ToString() + "\n");
             file_controller.Close();

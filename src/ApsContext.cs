@@ -1,8 +1,15 @@
-﻿using Newtonsoft.Json;
+﻿using Autodesk.Authentication;
+using Autodesk.Authentication.Model;
+
+using Autodesk.DataManagement;
+using Autodesk.DataManagement.Model;
+using Autodesk.Oss;
+using Autodesk.Oss.Model;
+using Autodesk.SDKManager;
+
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
-using System.Net.Http.Headers;
-using System.Runtime.InteropServices.JavaScript;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -12,36 +19,37 @@ namespace bim_push
 {
     public class ApsContext
     {
-        private HttpService httpService;
-        private Logger logHandle;
-        private AuthenticationToken? token = null;
-        private ApsProject? project = null;
+        private readonly SDKManager _SDKManager;
+        private readonly Logger _logHandle;
+        private AuthenticationToken _token;
+        private readonly ApsProjectFolder _project;
 
-        private class ApsProject
+        private class ApsProjectFolder
         {
             private string name;
-            private string hubId;
-            private string projectId;
-            private string folderId;
-            private int objectCount;
+            private string? hubId;
+            private string? projectId;
+            private string? folderId;
+            private int? objectCount;
 
-            public ApsProject(string name, string? hubId = null, string? projectId = null, string? folderId = null, int? objectCount = null)
+            public ApsProjectFolder(string name, string? hubId = null, string? projectId = null, string? folderId = null, int? objectCount = null)
             {
                 this.name = name;
                 this.hubId = hubId;
                 this.projectId = projectId;
                 this.folderId = folderId;
-                this.objectCount = objectCount == null ? -1 : (int)objectCount;
+                this.objectCount = objectCount;
             }
 
             public string GetName() { return this.name; }
-            public string GetHubId() { return this.hubId; }
+            public string? GetHubId() { return this.hubId; }
+            public void SetHubId(string id) { this.hubId = id; }
             public void SetProjectId(string id) { this.projectId = id; }
-            public string GetProjectId() { return this.projectId; }
+            public string? GetProjectId() { return this.projectId; }
             public void SetFolderId(string id) {  this.folderId = id; }
-            public string GetFolderId() {  return this.folderId; }
+            public string? GetFolderId() {  return this.folderId; }
             public void SetObjectCount(int count) { this.objectCount = count; }
-            public int GetObjectCount() { return this.objectCount; }
+            public int? GetObjectCount() { return this.objectCount; }
 
 
             public override string ToString()
@@ -53,60 +61,29 @@ namespace bim_push
         private class AuthenticationToken
         {
             public string Value;
-            
-            private DateTime expiresAt;
+            private readonly DateTime ExpiresAt;
 
-            public AuthenticationToken(ApsContext _owner)
+            public AuthenticationToken(ApsContext owner)
             {
-                string token = Convert.ToBase64String(Encoding.UTF8.GetBytes(Secrets.APS_CLIENT_ID + ":" + Secrets.APS_CLIENT_SECRET));
-                AuthenticationHeaderValue authString = new AuthenticationHeaderValue("Basic", token);
-                
-                HttpService.Header header = new HttpService.Header(authString, HttpService.acceptJson, HttpService.contentTypeUrlencoded);
+                AuthenticationClient authenticationClient = new(owner._SDKManager);
+                dynamic token = authenticationClient.GetTwoLeggedTokenAsync(Secrets.APS_CLIENT_ID, Secrets.APS_CLIENT_SECRET, [Scopes.DataRead, Scopes.DataWrite], throwOnError: true);
 
-                var body = new { grant_type = "client_credentials", scope = "data:read data:write" };
-
-                var response = _owner.httpService.PostAsync(Secrets.BASE_DOMAIN + "authentication/v2/token",
-                                                            header,
-                                                            data: new Dictionary<string, string>
-                                                            {
-                                                                ["grant_type"] = "client_credentials",
-                                                                ["scope"] = "data:read data:write"
-                                                            });
-                dynamic data = JObject.Parse(response.Result);
-
-                this.Value = data.access_token;
-
-                string secondsUntilExpiration = data.expires_in;
-                this.expiresAt = DateTime.Now.AddSeconds(double.Parse(secondsUntilExpiration) - 60);
+                this.Value = token.Result.AccessToken;
+                this.ExpiresAt = DateTime.Now.ToUniversalTime().AddSeconds(token.Result.ExpiresIn);
             }
 
             public bool IsExpired()
             {
-                return DateTime.Now >= this.expiresAt;
+                return DateTime.Now.ToUniversalTime() >= this.ExpiresAt;
             }
         }
 
-        public ApsContext(string projectName, string internalCloudPath) 
+        public ApsContext(string projectName) 
         {
-            this.httpService = new();
-            this.logHandle = new();
-
-            // read json and populate project info if found
-            ReadCache(projectName, internalCloudPath);
-
-            // if this.project == null, this.project?.GetFolderId() evaluates to null and doesn't throw an exception
-            if(this.project?.GetFolderId() == null) // cannot be null here unless big exception occurred
-            {
-                // project or destination folder isn't cached yet, find it and store it
-                FindFolderVars(internalCloudPath);
-            }
-
-            Console.WriteLine(this.project);
-        }
-
-        ~ApsContext() 
-        {
-            // release data structures
+            _SDKManager = SdkManagerBuilder.Create().Build();
+            _logHandle = new();
+            _token = new(this);
+            _project = new(projectName);
         }
 
         private void ReadCache(string projectName, string internalCloudPath)
@@ -119,7 +96,7 @@ namespace bim_push
                 // get projects obj
                 JObject root = File.Exists(config) && new FileInfo(config).Length > 0
                 ? JObject.Parse(File.ReadAllText(config))
-                : new JObject();
+                : [];
 
 
                 var match = root["hubs"]?
@@ -128,42 +105,38 @@ namespace bim_push
                         .Select(proj => new { Hub = hub, Project = proj}))
                     .FirstOrDefault(x => (string?)x.Project["name"] == projectName);
 
-                JObject? selectedProject = match.Project;
+                JObject? selectedProject = match?.Project;
 
                 if (selectedProject is not null)
                 {
                     Console.WriteLine($"Found project: {selectedProject}");
 
                     // if found, query folder_data looking for name = internalCloudPath[len - 1]
-                    JObject selectedFolder = selectedProject["folder_data"].Values<JObject>().FirstOrDefault(folder => folder["name"].Value<string>() == internalCloudPath.Split("/")[^1]);
+                    JObject? selectedFolder = selectedProject["folder_data"]?.Values<JObject>().FirstOrDefault(folder => folder?["name"]?.Value<string>() == internalCloudPath.Split("/")[^1]);
 
-                    if (selectedFolder != null)
+                    if (selectedFolder is not null)
                     {
                         Console.WriteLine($"Found folder: {selectedFolder}");
 
                         // if found initialize _project with id and objectCount
-                        this.project = new ApsProject(projectName,
-                                                    (string?)match.Hub["id"],
-                                                    (string?)match.Project["id"],
-                                                    selectedFolder["id"]?.ToString(),
-                                                    int.Parse(selectedFolder["objectCount"]?.ToString()));
+                        _project.SetHubId((string)match.Hub["id"]);
+                        _project.SetProjectId((string)match.Project["id"]);
+                        _project.SetFolderId(selectedFolder["id"].ToString());
+                        _project.SetObjectCount(int.Parse(selectedFolder["objectCount"].ToString()));
                     }
                     else
                     {
                         Console.WriteLine($"Folder not found: {selectedFolder}");
 
                         // store it's project id
-                        this.project = new ApsProject(projectName,
-                                                    (string?)match.Hub["id"],
-                                                    (string?)match.Project["id"],
-                                                    selectedProject["id"]?.ToString());
+                        _project.SetHubId((string)match.Hub["id"]);
+                        _project.SetProjectId((string)match.Project["id"]);
                     }
                 }
                 else
                 {
-                    Console.WriteLine("Project not found.");
-                    
-                    this.project = new(projectName);
+                    // no hub where project with name == projectName exists
+                    _logHandle.Log($"No hub where project with name {projectName} exists. Check correctness of the project name specified as argument.", true);
                 }
             }
             catch (Exception ex)
@@ -171,24 +144,104 @@ namespace bim_push
                 Console.Error.WriteLine(ex.ToString());
                 
                 // no need to hard exit, execution can continue
-                this.logHandle.Log($"An unexpected error occurred: {ex.ToString}", true);
+                _logHandle.Log($"An unexpected error occurred: {ex.ToString}", true);
             }
         }
 
-        private void FindFolderVars(string cloudPath)
+        private async Task FindFolderVarsAsync(string cloudPath)
         {
-            JObject newEntry = new JObject();
-            if (this.project?.GetProjectId() is not null)
-            {
-                // the project already exists within the cache but the folder isn't
+            DataManagementClient client = new(_SDKManager);
 
+            if (_project.GetProjectId() is null)
+            {
+                // nor the project or the folder was found
+                if (_token.IsExpired())
+                {
+                    _token = new(this);
+                }
+                var hubs = await client.GetHubsAsync(accessToken: _token.Value, throwOnError: true);
+                var hubsData = hubs.Data;
+
+                foreach (var hub in hubsData) // theoretically, only two hubs exist so no problem iterating over the array
+                {
+                    if(hub is not null)
+                    {
+                        if (_token.IsExpired())
+                        {
+                            _token = new(this);
+                        }
+                        var projects = await client.GetHubProjectsAsync(hubId: hub.Id, accessToken: _token.Value, throwOnError: true);
+                        var project = projects.Data.FirstOrDefault(p =>
+                                string.Equals(p.Attributes.Name, _project.GetName(), StringComparison.Ordinal));
+                        
+                        if(project is not null)
+                        {
+                            _project.SetHubId(hub.Id);
+                            _project.SetProjectId(project.Id);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if(_project.GetProjectId() is null)
+            {
+                _logHandle.Log("Project wasn't found, check correctness of the name", true);
             }
             else
             {
-                // nor the project or the folder was found
+                string[] cloudArray = cloudPath.Split("/");
 
+                // the project is already store but the folder isn't, find first folder ID "Project Files"
+                if (_token.IsExpired())
+                {
+                    _token = new(this);
+                }
+                var topfolders = await client.GetProjectTopFoldersAsync(hubId: _project.GetHubId(), projectId: _project.GetProjectId(), accessToken: _token.Value, throwOnError: true);
+                var topfolder = topfolders.Data.FirstOrDefault(f =>
+                                    string.Equals(f.Attributes.Name, cloudArray[0], StringComparison.Ordinal));
+
+                if (topfolder is not null)
+                {
+                    string folderId = topfolder.Id;
+
+                    // recursive find nested folders until end goal is reached
+                    dynamic? folder = null;
+                    for(int i = 1; i < cloudArray.Length; i++)
+                    {
+                        if (_token.IsExpired())
+                        {
+                            _token = new(this);
+                        }
+                        var folderContent = await client.GetFolderContentsAsync(projectId: _project.GetProjectId(), folderId: folderId, accessToken: _token.Value, throwOnError: true);
+                        try
+                        {
+                            folder = folderContent.Data.FirstOrDefault(d =>
+                                                        string.Equals(((dynamic)d).Attributes.Name, cloudArray[i], StringComparison.Ordinal));
+                            folderId = folder.Id;
+                        }
+                        catch (Exception ex)
+                        {
+                            folder = null;
+                            Console.WriteLine(ex.GetType().ToString());
+                            this._logHandle.Log($"Folder {cloudArray[i]} couldn't be found, check correctness of the name", true);
+                        }
+                    }
+
+                    if(folder is not null)
+                    {
+                        _project.SetFolderId(folderId);
+                        _project.SetObjectCount(int.Parse(folder.Attributes.ObjectCount.ToString()));
+                        Console.WriteLine(_project);
+                        WriteCache(new JObject
+                            {
+                                ["id"] = _project.GetFolderId(),
+                                ["name"] = cloudArray[^1],
+                                ["objectCount"] = _project.GetObjectCount()
+                            });
+                    }
+                }
             }
-            WriteCache(newEntry);
         }
 
         private void WriteCache(JObject folderInfo)
@@ -199,7 +252,7 @@ namespace bim_push
             // check existance of project_info.json file
             JObject root = File.Exists(config) && new FileInfo(config).Length > 0
                 ? JObject.Parse(File.ReadAllText(config)) 
-                : new JObject();
+                : [];
 
             // repeated checks of existance to avoid exceptions
             if (root["hubs"] is not JArray hubs)
@@ -210,13 +263,13 @@ namespace bim_push
 
             // search the hub id
             var hub = hubs.OfType<JObject>().FirstOrDefault(h =>
-                string.Equals((string?)h["id"], this.project.GetHubId(), StringComparison.Ordinal));
+                string.Equals((string?)h["id"], _project.GetHubId(), StringComparison.Ordinal));
 
             if(hub is null)
             {
                 hub = new JObject
                 {
-                    ["id"] = this.project.GetHubId(),
+                    ["id"] = _project.GetHubId(),
                     ["projects"] = new JArray()
                 };
                 hubs.Add(hub);
@@ -231,14 +284,14 @@ namespace bim_push
 
             // search the project
             var project = projects.OfType<JObject>().FirstOrDefault(p =>
-                string.Equals((string?)p["id"], this.project.GetProjectId(), StringComparison.Ordinal));
+                string.Equals((string?)p["id"], _project.GetProjectId(), StringComparison.Ordinal));
 
             if(project is null)
             {
                 project = new JObject
                 {
-                    ["id"] = this.project.GetProjectId(),
-                    ["name"] = this.project.GetName(),
+                    ["id"] = _project.GetProjectId(),
+                    ["name"] = _project.GetName(),
                     ["folder_data"] = new JArray()
                 };
                 projects.Add(project);
@@ -266,12 +319,251 @@ namespace bim_push
             }
         }
 
-        public void Run(string serverPath)
+        private async Task<string?> GetFileId(string filename)
         {
-            AuthenticationToken token = new(this);
-            //Console.WriteLine(token.Value);
+            DataManagementClient client = new(_SDKManager);
+            
+            // max elements per page are 200
+            int pages = (int)Math.Floor((double)(_project.GetObjectCount()! / 200.00));
+            for (int i = 0; i <= pages; i++)
+            {
+                if (_token.IsExpired())
+                {
+                    _token = new(this);
+                }
+                var folderContent = await client.GetFolderContentsAsync(projectId: _project.GetProjectId(), folderId: _project.GetFolderId(), pageNumber: i, accessToken: _token.Value, throwOnError: true);
+
+                dynamic? file = folderContent.Data.FirstOrDefault(c =>
+                        string.Equals(((dynamic)c).Attributes.DisplayName, filename, StringComparison.Ordinal));
+                Console.WriteLine($"File {filename} {(file is not null ? "found" : "not found")} in cloud folder {_project.GetFolderId()}");
+                if (file is not null) return file.Id;
+            }
+            return null;
         }
 
+        private async Task<bool> WasModified(string? fileId, string filepath)
+        {
+            if (fileId is null) return true; // file doesn't exist in the cloud yet
+            
+            DataManagementClient client = new(_SDKManager);
 
+            if (_token.IsExpired())
+            {
+                _token = new(this);
+            }
+            Item item = await client.GetItemAsync(projectId: _project.GetProjectId(), itemId: fileId, accessToken: _token.Value, throwOnError: true);
+
+            return File.GetLastWriteTimeUtc(filepath) <= item.Data.Attributes.LastModifiedTime.ToUniversalTime();
+        }
+
+        private async Task<List<string>> CreateStorageObject(string filename)
+        {
+            DataManagementClient client = new(_SDKManager);
+            Console.WriteLine(filename);
+            StoragePayload storagePayload = new() { 
+                Jsonapi = new JsonApiVersion() { 
+                    VarVersion = JsonApiVersionValue._10 
+                }, 
+                Data = new() { 
+                    Type = TypeObject.Objects, 
+                    Attributes = new() { 
+                        Name = filename 
+                    }, 
+                    Relationships = new() { 
+                        Target = new() { 
+                            Data = new() { 
+                                Type = TypeFolderItemsForStorage.Folders, 
+                                Id = _project.GetFolderId() 
+                            }
+                        }
+                    }
+                }
+            };
+            
+            if (_token.IsExpired())
+            {
+                _token = new(this);
+            }
+            Storage st = await client.CreateStorageAsync(projectId: _project.GetProjectId(), storagePayload: storagePayload, accessToken: _token.Value, throwOnError: true);
+            
+            return [st.Data.Id, st.Data.Id.Split("/")[^1], st.Data.Id.Split("/")[^2].Split(":")[^1]];
+        }
+
+        private async Task CreateFirstVersion(string filename, string objectId)
+        {
+            DataManagementClient client = new(_SDKManager);
+            
+            ItemPayload payload = new() { 
+                Jsonapi = new JsonApiVersion() { VarVersion = JsonApiVersionValue._10 }, 
+                Data = new() { 
+                    Type = TypeItem.Items, 
+                    Attributes = new() { 
+                        DisplayName = filename, 
+                        Extension = new() { 
+                            Type = "items:autodesk.bim360:File", 
+                            VarVersion = "1.0" 
+                        }
+                    }, 
+                    Relationships = new() { 
+                        Tip = new() { 
+                            Data = new() { 
+                                Type = TypeVersion.Versions, 
+                                Id = "1" 
+                            } 
+                        }, 
+                        Parent = new() { 
+                            Data = new() { 
+                                Type = TypeFolder.Folders, 
+                                Id = _project.GetFolderId() 
+                            } 
+                        }
+                    }
+                }, 
+                Included = [ new() {
+                    Type = TypeVersion.Versions,
+                    Id = "1",
+                    Attributes = new() {
+                        Name = filename,
+                        Extension = new() {
+                            Type = "versions:autodesk.bim360:File",
+                            VarVersion = "1.0"
+                        }
+                    },
+                    Relationships = new() {
+                        Storage = new() {
+                            Data = new() {
+                                Type = TypeObject.Objects,
+                                Id = objectId
+                            }
+                        }
+                    } 
+                }]
+            };
+
+            if (_token.IsExpired())
+            {
+                _token = new(this);
+            }
+            await client.CreateItemAsync(projectId: _project.GetProjectId(), itemPayload: payload, accessToken: _token.Value, throwOnError: true);
+        }
+
+        private async Task CreateAdditionalVersion(string filename, string fileId, string objectId)
+        {
+            DataManagementClient client = new(_SDKManager);
+
+            VersionPayload payload = new()
+            {
+                Jsonapi = new JsonApiVersion() { VarVersion = JsonApiVersionValue._10 },
+                Data = new()
+                {
+                    Type = TypeVersion.Versions,
+                    Attributes = new()
+                    {
+                        Name = filename,
+                        Extension = new()
+                        {
+                            Type = "versions:autodesk.bim360:File",
+                            VarVersion = "1.0"
+                        }
+                    },
+                    Relationships = new()
+                    {
+                        Item = new()
+                        {
+                            Data = new()
+                            {
+                                Type = TypeItem.Items,
+                                Id = fileId
+                            }
+                        },
+                        Storage = new()
+                        {
+                            Data = new()
+                            {
+                                Type = TypeObject.Objects,
+                                Id = objectId
+                            }
+                        }
+                    }
+                }
+            };
+
+            if (_token.IsExpired())
+            {
+                _token = new(this);
+            }
+            await client.CreateVersionAsync(projectId: _project.GetProjectId(), versionPayload: payload, accessToken: _token.Value, throwOnError: true);
+        }
+
+        public async Task UploadAsync(string serverPath, string internalCloudPath)
+        {
+            IEnumerable<string> paths;
+            
+            // folder passed as starting point, upload all files under this directory and subdirectories
+            if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) == FileAttributes.Directory)
+            {
+                paths = Directory
+                    .EnumerateFiles(serverPath, "*", new EnumerationOptions { RecurseSubdirectories = true })
+                    .Where(f => !Path.GetExtension(f).Equals(".log", StringComparison.OrdinalIgnoreCase));
+
+            }
+            else // single file upload
+            {
+                paths = [serverPath];
+            }
+
+            // read json and populate project info if found
+            ReadCache(_project.GetName(), internalCloudPath);
+
+            if (_project.GetFolderId() is null)
+            {
+                // project or destination folder isn't cached yet, find it and store it
+                await FindFolderVarsAsync(internalCloudPath);
+            }
+
+            if (_project.GetFolderId() is null) // by this point, if the folderId is still null, it means that the project or the folder isn't found in the cloud
+            {
+                _logHandle.Log("Couldn't retrieve all variables necessary to complete upload...", true);
+                throw new Exception("Couldn't retrieve all variables necessary to complete upload...");
+            }
+
+            foreach (string path in paths)
+            {
+                string? fileId = GetFileId(path.Split("\\")[^1]).Result;
+                if (!WasModified(fileId, path).Result)
+                {
+                    _logHandle.Log($"File {path} has not been modified, thus will not be updated in the cloud", true);
+                }
+                else
+                {
+                    DataManagementClient client = new(_SDKManager);
+
+                    // Step 1: Create a Storage Object
+                    List<string> storageInfo = await CreateStorageObject(path.Split("\\")[^1]);
+                    string objectId = storageInfo[0];
+                    string objectKey = storageInfo[1];
+                    string bucketKey = storageInfo[2];
+
+                    // Step 2: Upload a File to a Signed URL
+                    OssClient ossClient = new(_SDKManager);
+                    if (_token.IsExpired())
+                    {
+                        _token = new(this);
+                    }
+                    await ossClient.UploadObjectAsync(bucketKey: bucketKey, objectKey: objectKey, sourceToUpload: File.OpenRead(path), accessToken: _token.Value);
+
+                    // Step 3: Create a Version of the File in the Cloud
+                    if (fileId is null)
+                    {
+                        await CreateFirstVersion(path.Split("\\")[^1], objectId);
+                    }
+                    else
+                    {
+                        await CreateAdditionalVersion(path.Split("\\")[^1], fileId, objectId);
+                    }
+                }
+            }
+            _logHandle.Dispose();
+        }
     }
 }
