@@ -29,23 +29,30 @@ string projectName = args[0];
 string serverPath = args[1];
 string internalCloudPath = args[2];
 
+Logger logHandle = new(projectName);
+logHandle.Log(message: $"Execution started for server path: {serverPath}, internal cloud path: {internalCloudPath}");
+
 if((new DirectoryInfo(serverPath).Attributes & FileAttributes.Directory) != FileAttributes.Directory && !File.Exists(serverPath))
 {
-    Console.Error.WriteLine($"Server path is invalid: {serverPath}");
+    logHandle.Log(message: $"Server path is invalid: {serverPath}", error: true);
     return 1;
 }
 
 try
 {
-    ApsContext apsContext = new ApsContext(projectName);
-    await apsContext.UploadAsync(serverPath, internalCloudPath);
+    ApsContext apsContext = new(logHandle: logHandle, projectName: projectName);
+    await apsContext.UploadAsync(serverPath: serverPath, internalCloudPath: internalCloudPath);
 
-    Console.WriteLine("All done.");
+    Console.WriteLine("Workflow completed.");
+    logHandle.Dispose();
     return 0;
 }
 catch(Exception ex)
 {
     Console.Error.WriteLine($"Fatal error: {ex.Message}");
     Console.Error.WriteLine(ex.StackTrace);
+
+    logHandle.Log(message: $"Execution ended due to error: {ex.Message}", error: true);
+    logHandle.Dispose();
     return 2;
 }

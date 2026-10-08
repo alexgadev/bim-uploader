@@ -1,6 +1,8 @@
 bin/
 obj/
 .vs/
+Properties/
 src/Secrets.cs
 *.json
 project-info.xlsx
+bim-push.csproj.user
